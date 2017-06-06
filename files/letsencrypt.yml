@@ -1,0 +1,299 @@
+---
+kind: Template
+apiVersion: v1
+metadata:
+  name: letsencrypt
+objects:
+- kind: ImageStream
+  apiVersion: v1
+  metadata:
+    name: letsencrypt
+    labels:
+      app: letsencrypt
+  spec: {}
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: letsencrypt-base
+    labels:
+      app: letsencrypt
+  spec:
+    tags:
+      - name: latest
+        from:
+          kind: DockerImage
+          name: ${LETSENCRYPT_BASE_IMAGE}
+        importPolicy:
+          scheduled: true
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: letsencrypt-proxy
+    labels:
+      app: letsencrypt
+  spec:
+     tags:
+      - name: latest
+        from:
+          kind: DockerImage
+          name: ${LETSENCRYPT_PROXY_IMAGE}
+        importPolicy:
+          scheduled: true
+- kind: BuildConfig
+  apiVersion: v1
+  metadata:
+    name: letsencrypt
+    labels:
+      app: letsencrypt
+  spec:
+    triggers:
+    - type: ConfigChange
+    - type: ImageChange
+      imageChange: {}
+    source:
+      type: Git
+      git:
+        uri: ${LETSENCRYPT_SOURCE}
+        ref: ${LETSENCRYPT_VERSION}
+    strategy:
+      type: Docker
+      dockerStrategy:
+        dockerfilePath: ${LETSENCRYPT_DOCKERFILE}
+        from:
+          kind: ImageStreamTag
+          name: letsencrypt-base:latest
+    output:
+      to:
+        kind: ImageStreamTag
+        name: letsencrypt:latest
+    resources: {}
+    postCommit: {}
+- kind: DeploymentConfig
+  apiVersion: v1
+  metadata:
+    name: letsencrypt
+    labels:
+      app: letsencrypt
+  spec:
+    strategy:
+      type: Rolling
+      rollingParams:
+        updatePeriodSeconds: 1
+        intervalSeconds: 1
+        timeoutSeconds: 600
+        maxUnavailable: 25%
+        maxSurge: 25%
+      resources: {}
+    triggers:
+    - type: ConfigChange
+    - type: ImageChange
+      imageChangeParams:
+        automatic: true
+        containerNames:
+        - letsencrypt
+        from:
+          kind: ImageStreamTag
+          name: letsencrypt:latest
+    - type: ImageChange
+      imageChangeParams:
+        automatic: true
+        containerNames:
+        - letsencrypt-proxy
+        from:
+          kind: ImageStreamTag
+          name: letsencrypt-proxy:latest
+    replicas: 1
+    test: false
+    selector:
+      app: letsencrypt
+      deploymentconfig: letsencrypt
+    template:
+      metadata:
+        creationTimestamp:
+        labels:
+          app: letsencrypt
+          deploymentconfig: letsencrypt
+      spec:
+        volumes:
+        - name: letsencrypt-data
+          emptyDir: {}
+        - name: oauth-proxy-secret
+          secret:
+            secretName: oauth-proxy
+        containers:
+        - name: letsencrypt
+          image: letsencrypt:latest
+          ports:
+          - containerPort: 8080
+            protocol: TCP
+          resources: {}
+          volumeMounts:
+          - name: letsencrypt-data
+            mountPath: /var/lib/letsencrypt
+          terminationMessagePath: /dev/termination-log
+          imagePullPolicy: Always
+        - name: letsencrypt-proxy
+          image: letsencrypt-proxy:latest
+          ports:
+          - name: oaproxy
+            containerPort: 3000
+            protocol: TCP
+          env:
+          - name: OAP_BACKEND_URL
+            value: http://localhost:8080
+          - name: OAP_AUTH_MODE
+            value: oauth2
+          - name: OAP_SCOPE
+            value: user:full
+          - name: OAP_TRANSFORM
+            value: user_header,token_header
+          - name: OAP_OAUTH_ID
+            value: letsencrypt-oauth-proxy
+          - name: OAP_MASTER_URL
+            value: https://kubernetes.default.svc.cluster.local
+          - name: OAP_PUBLIC_MASTER_URL
+            value: ${PUBLIC_MASTER_URL}
+          - name: OAP_MASTER_CA_FILE
+            value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          - name: OAP_DEBUG
+            value: 'false'
+          - name: OAP_OAUTH_SECRET_FILE
+            value: /secret/oauth-secret
+          - name: OAP_SERVER_CERT_FILE
+            value: /secret/server-cert
+          - name: OAP_SERVER_KEY_FILE
+            value: /secret/server-key
+          - name: OAP_SERVER_TLS_FILE
+            value: /secret/server-tls.json
+          - name: OAP_SESSION_SECRET_FILE
+            value: /secret/session-secret
+          - name: OCP_AUTH_PROXY_MEMORY_LIMIT
+            valueFrom:
+              resourceFieldRef:
+                containerName: letsencrypt-proxy
+                resource: limits.memory
+          resources:
+            limits:
+              memory: ${LETSENCRYPT_PROXY_MEMORY_LIMIT}
+          volumeMounts:
+          - name: oauth-proxy-secret
+            mountPath: /secret
+          terminationMessagePath: /dev/termination-log
+          imagePullPolicy: Always
+        restartPolicy: Always
+        terminationGracePeriodSeconds: 30
+        dnsPolicy: ClusterFirst
+        securityContext: {}
+        serviceAccount: letsencrypt
+        serviceAccountName: letsencrypt
+- kind: Route
+  apiVersion: v1
+  metadata:
+    name: letsencrypt
+    labels:
+      app: letsencrypt
+  spec:
+    host: ${LETSENCRYPT_FRONTEND_HOST}
+    to:
+      kind: Service
+      name: letsencrypt
+    port:
+      targetPort: 443-tcp
+- kind: Route
+  apiVersion: v1
+  metadata:
+    name: letsencrypt-challenge
+    labels:
+      app: letsencrypt
+  spec:
+    host: ${LETSENCRYPT_CHALLENGE_HOST}
+    to:
+      kind: Service
+      name: letsencrypt
+    port:
+      targetPort: 8080-tcp
+- kind: Service
+  apiVersion: v1
+  metadata:
+    name: letsencrypt
+    labels:
+      app: letsencrypt
+  spec:
+    ports:
+    - name: 443-tcp
+      protocol: TCP
+      port: 443
+      targetPort: oaproxy
+    - name: 8080-tcp
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    selector:
+      app: letsencrypt
+      deploymentconfig: letsencrypt
+    type: ClusterIP
+    sessionAffinity: None
+- kind: OAuthClient
+  apiVersion: v1
+  metadata:
+    name: letsencrypt-oauth-proxy
+  redirectURIs:
+  - https://${LETSENCRYPT_FRONTEND_HOST}
+  secret: ${LETSENCRYPT_OAUTH_SECRET}
+- kind: ServiceAccount
+  apiVersion: v1
+  metadata:
+    name: letsencrypt
+  secrets:
+  - name: oauth-proxy
+- kind: PersistentVolumeClaim
+  apiVersion: v1
+  metadata:
+    name: letsencrypt-data
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: "${LETSENCRYPT_VOLUME_SIZE}"
+parameters:
+- description: OpenShift public master URL
+  name: PUBLIC_MASTER_URL
+  required: true
+- description: Let's Encrypt Frontend Hostname
+  name: LETSENCRYPT_FRONTEND_HOST
+  required: true
+- description: Let's Encrypt Challenge Hostname
+  name: LETSENCRYPT_CHALLENGE_HOST
+  required: true
+- description: Let's Encrypt OAuth Secret
+  name: LETSENCRYPT_OAUTH_SECRET
+  required: true
+- description: Let's Encrypt Source Repository
+  name: LETSENCRYPT_SOURCE
+  required: true
+  value: https://github.com/appuio/letsencrypt
+- description: Let's Encrypt Source Version, i.e. ref of Let's Encrypt Source Repository
+  name: LETSENCRYPT_VERSION
+  required: true
+  value: master
+- description: Base image for Let's Encrypt, registry.access.redhat.com/rhel7 or centos:7, defaults to the former
+  name: LETSENCRYPT_BASE_IMAGE
+  required: true
+  value: registry.access.redhat.com/rhel7
+- description: Image of Let's Encrypt OAuth proxy, registry.access.redhat.com/openshift3/logging-auth-proxy or openshift/origin-logging-auth-proxy. Defaults to the former.
+  name: LETSENCRYPT_PROXY_IMAGE
+  required: true
+  value: registry.access.redhat.com/openshift3/logging-auth-proxy
+- descroption: Memory limit of Let's Encrypt OAuth proxy container, default 96Mi
+  name: LETSENCRYPT_PROXY_MEMORY_LIMIT
+  required: true
+  value: 96Mi
+- description: Dockerfile used to build Let's Encrypt image, Dockerfile.rhel7 or Dockerfile (CentOS), defaults to Dockerfile.rhel7
+  name: LETSENCRYPT_DOCKERFILE
+  required: true
+  value: Dockerfile.rhel7
+- description: Size of Let's Encrypt persistent volume
+  name: LETSENCRYPT_VOLUME_SIZE
+  required: true
+  value: 1Gi

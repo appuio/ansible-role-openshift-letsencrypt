@@ -16,3 +16,7 @@ dependencies:
   version: v1.0.0
   prestart_scripts:
     patch-letsencrypt.sh: "{{ lookup('file', 'files/patch-letsencrypt.sh') }}"
+  env:
+  - name: LETSENCRYPT_HOST
+    value: "{{ letsencrypt_challenge_host }}"
+

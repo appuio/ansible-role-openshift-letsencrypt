@@ -1,1 +1,77 @@
 ---
+- name: Create project for Let's Encrypt
+  openshift_project:
+    name: "{{ namespace }}"
+
+- name: Create OAuth proxy certificate
+  openshift_ca:
+    command: create-server-cert
+    key: /etc/origin/master/letsencrypt-proxy.key
+    cert: /etc/origin/master/letsencrypt-proxy.crt
+    hostnames: oauth-proxy
+
+- name: Create OAuth secret
+  shell: "dd if=/dev/urandom bs=64 count=1 | base64 -w0 > /etc/origin/master/letsencrypt-oauth-secret"
+  args:
+    creates: /etc/origin/master/letsencrypt-oauth-secret
+
+- name: Create proxy session secret
+  shell: "dd if=/dev/urandom bs=200 count=1 | base64 -w0 > /etc/origin/master/letsencrypt-proxy-secret"
+  args:
+    creates: /etc/origin/master/letsencrypt-proxy-secret
+
+- name: Create proxy OpenShift secret
+  openshift_resource:
+    namespace: "{{ namespace }}"
+    patch:
+      kind: Secret
+      metadata:
+        name: oauth-proxy
+      type: Opaque
+      data:
+        oauth-secret: "{{ lookup('file', '/etc/origin/master/letsencrypt-oauth-secret') | b64encode }}"
+        session-secret: "{{ lookup('file', '/etc/origin/master/letsencrypt-proxy-secret') | b64encode }}"
+        server-key: "{{ lookup('file', '/etc/origin/master/letsencrypt-proxy.key') | b64encode }}"
+        server-cert: "{{ lookup('file', '/etc/origin/master/letsencrypt-proxy.crt') | b64encode }}"
+        server-tls.json: "{{ lookup('file', 'server-tls.json') | b64encode }}"
+
+- name: Instantiate letsencrypt template
+  openshift_resource:
+    namespace: "{{ namespace }}"
+    template: "{{ role_path }}/files/letsencrypt.yml"
+    arguments:
+      PUBLIC_MASTER_URL: "{{ master_public_api_url | default(openshift_master_public_api_url) }}/"
+      LETSENCRYPT_FRONTEND_HOST: "{{ letsencrypt_frontend_host | mandatory }}"
+      LETSENCRYPT_CHALLENGE_HOST: "{{ letsencrypt_challenge_host | mandatory }}"
+      LETSENCRYPT_OAUTH_SECRET: "{{ lookup('file', '/etc/origin/master/letsencrypt-oauth-secret') }}"
+      LETSENCRYPT_BASE_IMAGE: "{{ ((deployment_type | default(openshift_deployment_type)) == 'origin') | ternary('centos:7', 'registry.access.redhat.com/rhel7') }}"
+#      LETSENCRYPT_PROXY_IMAGE: "{{ ((deployment_type | default(openshift_deployment_type)) == 'origin') | ternary('openshift/origin-logging-auth-proxy', 'registry.access.redhat.com/openshift3/logging-auth-proxy') }}"
+      LETSENCRYPT_PROXY_IMAGE: quay.io/appuio/openshift-auth-proxy
+      LETSENCRYPT_PROXY_MEMORY_LIMIT: "{{ proxy_memory_limit }}"
+      LETSENCRYPT_DOCKERFILE: "{{ ((deployment_type | default(openshift_deployment_type)) == 'origin') | ternary('Dockerfile', 'Dockerfile.rhel7') }}"
+      LETSENCRYPT_SOURCE: "{{ src | default('https://github.com/appuio/letsencrypt.git') }}"
+      LETSENCRYPT_VERSION: "{{ version | default('master') }}"
+
+- name: Get letsencrypt route termination
+  command: "oc get route -n {{ namespace }} letsencrypt -o jsonpath='{.spec.tls..termination}'"
+  register: letsencrypt_transport
+  changed_when: false
+
+# Prevent overwriting different termination type, e.g. after applying Let's Encrypt
+- name: Configure letsencrypt route termination
+  openshift_resource:
+    namespace: "{{ namespace }}"
+    patch:
+      kind: Route
+      metadata:
+        name: letsencrypt
+      spec:
+        tls:
+          termination: passthrough
+  when: letsencrypt_transport.stdout == ""
+
+- name: Configure permissions for letsencrypt service account
+  openshift_policy:
+    cluster_roles:
+    - edit
+    users: "system:serviceaccount:{{ namespace }}:letsencrypt"

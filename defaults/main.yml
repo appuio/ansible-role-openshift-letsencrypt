@@ -1,0 +1,4 @@
+---
+namespace: appuio-infra
+openshift_deployment_type: openshift-enterprise
+proxy_memory_limit: 96Mi
