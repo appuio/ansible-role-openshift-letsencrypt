@@ -24,6 +24,7 @@
   openshift_resource:
     namespace: "{{ namespace }}"
     patch:
+      apiVersion: v1
       kind: Secret
       metadata:
         name: oauth-proxy
