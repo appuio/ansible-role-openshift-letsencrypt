@@ -13,7 +13,7 @@ galaxy_info:
   - cloud
 dependencies:
 - src: git+file:///vagrant/work/ansible-role-openshift-haproxy
-  version: v1.0.0
+  version: master
   prestart_scripts:
     patch-letsencrypt.sh: "{{ lookup('file', 'files/patch-letsencrypt.sh') }}"
   env:
