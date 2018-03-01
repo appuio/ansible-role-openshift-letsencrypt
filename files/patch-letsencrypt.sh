@@ -2,13 +2,21 @@
 
 set -e
 
+# Detect correct HTTP backend mapping expression as it varies over different OpenShift versions
+http_backend=$(sed -n '0,/.*use_backend \(be_http.%\[\)base\(,[^]]\+\]\).*/ s//\1env(LETSENCRYPT_HOST)\2/p' $1)
+
+if [ -z "${http_backend}" ]; then
+  echo "Can't detect HTTP backend mapping and therefore can't configure Let's Encrypt integration!" >&2
+  exit 1
+fi
+
 sed -e 's|redirect scheme https if secure_redirect|\
   acl path_letsencrypt path_beg /.well-known/acme-challenge/\
   acl path_letsencrypt path_beg /.well-known/letsencrypt\
 \
   redirect scheme https if secure_redirect !path_letsencrypt\
 \
-  use_backend be_http_%[env(LETSENCRYPT_HOST),map_beg(/var/lib/haproxy/conf/os_http_be.map)] if path_letsencrypt\
+  use_backend '${http_backend}' if path_letsencrypt\
 \
 |' <$1 >$1.tmp
 
